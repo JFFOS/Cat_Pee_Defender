@@ -8,3 +8,4 @@ yolov8n.pt
 __pycache__/
 *.pyc
 .idea/
+.DS_Store

@@ -22,13 +22,13 @@ from pathlib import Path
 
 import cv2
 
-from alerts import play_sound, send_discord, send_discord_video
+from alerts import Alarm, send_discord, send_discord_video
 from config import CAT_CLASS_ID, Settings
 from logbook import ClipRecorder, append_event, save_snapshot
 
 
-def load_zones(settings: Settings) -> tuple[list[dict], list[dict], int | None, int | None]:
-    """Return (unsafe_boxes, safe_boxes, frame_w, frame_h) from zones.json.
+def load_zones(settings: Settings) -> tuple[list[dict], int | None, int | None]:
+    """Return (unsafe_boxes, frame_w, frame_h) from zones.json.
 
     Accepts the legacy "warning" key as an alias for "unsafe".
     """
@@ -39,8 +39,7 @@ def load_zones(settings: Settings) -> tuple[list[dict], list[dict], int | None, 
         )
     data = json.loads(path.read_text())
     unsafe = data.get("unsafe", data.get("warning", []))
-    safe = data.get("safe", [])
-    return unsafe, safe, data.get("frame_w"), data.get("frame_h")
+    return unsafe, data.get("frame_w"), data.get("frame_h")
 
 
 def scale_boxes(boxes: list[dict], ref_w, ref_h, cur_w: int, cur_h: int) -> list[dict]:
@@ -59,6 +58,44 @@ def scale_boxes(boxes: list[dict], ref_w, ref_h, cur_w: int, cur_h: int) -> list
     ]
 
 
+def _boxes_overlap(a: dict, b: dict) -> bool:
+    return not (
+        a["x"] + a["w"] < b["x"] or b["x"] + b["w"] < a["x"]
+        or a["y"] + a["h"] < b["y"] or b["y"] + b["h"] < a["y"]
+    )
+
+
+def _union_box(a: dict, b: dict) -> dict:
+    x1, y1 = min(a["x"], b["x"]), min(a["y"], b["y"])
+    x2 = max(a["x"] + a["w"], b["x"] + b["w"])
+    y2 = max(a["y"] + a["h"], b["y"] + b["h"])
+    return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
+
+
+def merge_boxes(boxes: list[dict]) -> list[dict]:
+    """Collapse overlapping rectangles into their union bounding box.
+
+    Repeats until no two remaining boxes overlap, so a chain of overlapping
+    danger areas becomes one clean rectangle for a cleaner overlay.
+    """
+    boxes = [dict(b) for b in boxes]
+    changed = True
+    while changed:
+        changed = False
+        out: list[dict] = []
+        for cur in boxes:
+            i = 0
+            while i < len(out):
+                if _boxes_overlap(cur, out[i]):
+                    cur = _union_box(cur, out.pop(i))
+                    changed = True
+                else:
+                    i += 1
+            out.append(cur)
+        boxes = out
+    return boxes
+
+
 def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     for b in boxes:
         if b["x"] <= px <= b["x"] + b["w"] and b["y"] <= py <= b["y"] + b["h"]:
@@ -66,10 +103,8 @@ def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     return False
 
 
-def draw_overlay(frame, unsafe: list[dict], safe: list[dict],
+def draw_overlay(frame, unsafe: list[dict],
                  detections: list[tuple], in_zone: bool, recording: bool = False):
-    for b in safe:
-        cv2.rectangle(frame, (b["x"], b["y"]), (b["x"] + b["w"], b["y"] + b["h"]), (0, 200, 0), 2)
     for b in unsafe:
         cv2.rectangle(frame, (b["x"], b["y"]), (b["x"] + b["w"], b["y"] + b["h"]), (0, 0, 255), 2)
     for (x1, y1, x2, y2, conf, hit) in detections:
@@ -90,8 +125,12 @@ def draw_overlay(frame, unsafe: list[dict], safe: list[dict],
 def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     from ultralytics import YOLO
 
-    unsafe_boxes, safe_boxes, ref_w, ref_h = load_zones(settings)
-    print(f"[watch] loaded {len(unsafe_boxes)} unsafe + {len(safe_boxes)} safe zone(s)")
+    unsafe_boxes, ref_w, ref_h = load_zones(settings)
+    raw_unsafe = len(unsafe_boxes)
+    unsafe_boxes = merge_boxes(unsafe_boxes)
+    if len(unsafe_boxes) != raw_unsafe:
+        print(f"[watch] merged {raw_unsafe} overlapping unsafe box(es) -> {len(unsafe_boxes)}")
+    print(f"[watch] loaded {len(unsafe_boxes)} unsafe zone(s)")
 
     print(f"[watch] loading model on device={settings.device} ...")
     model = YOLO(settings.model_path)
@@ -122,7 +161,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     last_alert: float = -1e9
     event_max_conf: float = 0.0          # best confidence seen during this visit
     unsafe = unsafe_boxes
-    safe = safe_boxes
+    alarm = Alarm(settings.sound_path)   # loops while the cat is in the unsafe zone
 
     def finalize_clip(path: str | None, reason: str) -> None:
         """Log the finished visit clip and upload it to Discord."""
@@ -154,7 +193,6 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
             if frame_i % settings.process_every_n == 0:
                 h, w = frame.shape[:2]
                 unsafe = scale_boxes(unsafe_boxes, ref_w, ref_h, w, h)
-                safe = scale_boxes(safe_boxes, ref_w, ref_h, w, h)
 
                 results = model.predict(
                     frame,
@@ -169,8 +207,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
                         conf = float(box.conf[0])
                         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                        # Safe zones override: a cat in a safe area never counts.
-                        hit = point_in_boxes(cx, cy, unsafe) and not point_in_boxes(cx, cy, safe)
+                        hit = point_in_boxes(cx, cy, unsafe)
                         detections.append((x1, y1, x2, y2, conf, hit))
                         if hit:
                             cat_in_unsafe = True
@@ -178,6 +215,14 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 cat_present = len(detections) > 0
                 best_conf_any = max((d[4] for d in detections), default=0.0)
                 best_conf_unsafe = max((d[4] for d in detections if d[5]), default=0.0)
+
+                if cat_present:
+                    zone_note = " [UNSAFE ZONE]" if cat_in_unsafe else ""
+                    print(
+                        f"[detect] {len(detections)} cat(s) conf={best_conf_any:.2f}"
+                        f"{zone_note}",
+                        flush=True,
+                    )
 
                 # --- TIER 1: any cat anywhere ("passed by") -> log, notify, record ---
                 if cat_present:
@@ -187,7 +232,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                         present_since = now
                         event_max_conf = best_conf_any
                         print("[watch] cat spotted; recording visit.")
-                        snapshot = draw_overlay(frame.copy(), unsafe, safe, detections,
+                        snapshot = draw_overlay(frame.copy(), unsafe, detections,
                                                 cat_in_unsafe)
                         snap = save_snapshot(settings, snapshot)
                         event_rec.start(frame, now)
@@ -207,29 +252,37 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     if unsafe_since is None:
                         unsafe_since = now
                 elif unsafe_since is not None:
+                    # Cat has been out of the zone longer than the grace window.
                     if now - last_seen_unsafe > settings.presence_gap_grace:
                         unsafe_since = None
+                        if alarm.playing:
+                            alarm.stop()
+                            print("[watch] cat left the unsafe zone; alarm stopped.")
 
                 if unsafe_since is not None:
                     dwell = now - unsafe_since
-                    if dwell >= settings.dwell_seconds and (now - last_alert) >= settings.alert_cooldown_s:
-                        msg = (
-                            f"🚨 Cat on the sofa (UNSAFE zone) for {int(dwell)}s! "
-                            f"conf={best_conf_unsafe:.2f}"
-                        )
-                        print(f"[watch] ALERT: {msg}")
-                        if not no_sound:
-                            play_sound(settings.sound_path)
-                        snapshot = draw_overlay(frame.copy(), unsafe, safe, detections, True)
-                        snap_path = save_snapshot(settings, snapshot)
-                        send_discord(webhook, msg, snapshot)
-                        append_event(settings, "alert", "sofa", best_conf_unsafe, dwell,
-                                     snapshot=snap_path, clip=event_rec.path or "")
-                        last_alert = now
+                    if dwell >= settings.dwell_seconds:
+                        # Keep the loud deterrent looping for as long as the cat stays.
+                        if not no_sound and not alarm.playing:
+                            print("[watch] ALARM: looping until the cat leaves the zone.")
+                            alarm.start()
+                        # Discord alert + logged snapshot, throttled so we don't spam.
+                        if (now - last_alert) >= settings.alert_cooldown_s:
+                            msg = (
+                                f"🚨 Cat on the sofa (UNSAFE zone) for {int(dwell)}s! "
+                                f"conf={best_conf_unsafe:.2f}"
+                            )
+                            print(f"[watch] ALERT: {msg}")
+                            snapshot = draw_overlay(frame.copy(), unsafe, detections, True)
+                            snap_path = save_snapshot(settings, snapshot)
+                            send_discord(webhook, msg, snapshot)
+                            append_event(settings, "alert", "sofa", best_conf_unsafe, dwell,
+                                         snapshot=snap_path, clip=event_rec.path or "")
+                            last_alert = now
 
             # --- record every frame while a visit is in progress ---
             if present_since is not None and event_rec.active:
-                event_rec.write(draw_overlay(frame.copy(), unsafe, safe, detections,
+                event_rec.write(draw_overlay(frame.copy(), unsafe, detections,
                                              cat_in_unsafe, recording=True))
                 capped = event_rec.maybe_finish(now)  # split very long visits
                 if capped:
@@ -237,7 +290,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     event_rec.start(frame, now)
 
             if show:
-                view = draw_overlay(frame.copy(), unsafe, safe, detections,
+                view = draw_overlay(frame.copy(), unsafe, detections,
                                     cat_in_unsafe, recording=event_rec.active)
                 cv2.imshow("Cat Watch (q to quit)", view)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -245,6 +298,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     except KeyboardInterrupt:
         print("\n[watch] stopped by user.")
     finally:
+        alarm.stop()
         finalize_clip(event_rec.stop(), "watcher stopped")
         cap.release()
         cv2.destroyAllWindows()
@@ -262,9 +316,12 @@ def main() -> None:
     settings = Settings()
 
     if args.test_sound:
-        print("[test] playing alarm...")
-        play_sound(settings.sound_path)
-        time.sleep(2.5)
+        print("[test] looping alarm for ~8s (as it would while a cat stays)...")
+        alarm = Alarm(settings.sound_path)
+        alarm.start()
+        time.sleep(8)
+        alarm.stop()
+        print("[test] alarm stopped.")
         return
 
     if args.test_discord:

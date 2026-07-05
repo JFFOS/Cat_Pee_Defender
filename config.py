@@ -56,9 +56,9 @@ class Settings:
     device: str = field(default_factory=_auto_device)
 
     # Dwell / alert logic
-    dwell_seconds: float = 10.0       # continuous in-zone time before firing
+    dwell_seconds: float = 2.0        # continuous in-zone time before firing
     presence_gap_grace: float = 1.5   # tolerate detection dropouts up to this long
-    alert_cooldown_s: float = 60.0    # min gap between two fired alerts
+    alert_cooldown_s: float = 60.0    # min gap between two Discord alerts (sound loops regardless)
 
     # Recording — a clip holds only the frames where the cat is in an unsafe zone,
     # packed together (empty room is never recorded). One clip per visit.
@@ -69,6 +69,10 @@ class Settings:
     # Discord video
     discord_video: bool = True        # upload the event clip to Discord
     discord_max_bytes: int = 8_000_000  # skip upload above this (Discord ~10MB cap)
+
+    # Local retention — Discord keeps the full archive, so on disk we only keep the
+    # most recent files for debugging. Older snapshots/clips are pruned automatically.
+    keep_recent: int = 10             # newest snapshots and clips to keep locally
 
     # Paths (resolved from module-level constants above)
     model_path: str = str(MODEL_PATH)

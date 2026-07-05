@@ -94,17 +94,9 @@ def draw_zones(settings: Settings) -> None:
     if not unsafe:
         raise SystemExit("No unsafe zones drawn; nothing saved.")
 
-    print(
-        "\nStep 2 — (optional) draw SAFE zone(s) (floor/water where it's fine, shown GREEN).\n"
-        "  A cat inside a safe zone never triggers, even if it overlaps an unsafe box.\n"
-        "  Press ESC immediately to skip.\n"
-    )
-    safe = _draw_boxes(frame, "SAFE", (0, 200, 0),
-                       existing=[(unsafe, (0, 0, 255), "UNSAFE")])
-
-    data = {"frame_w": w, "frame_h": h, "unsafe": unsafe, "safe": safe}
+    data = {"frame_w": w, "frame_h": h, "unsafe": unsafe}
     ZONES_PATH.write_text(json.dumps(data, indent=2))
-    print(f"[setup] wrote {len(unsafe)} unsafe + {len(safe)} safe zone(s) -> {ZONES_PATH}")
+    print(f"[setup] wrote {len(unsafe)} unsafe zone(s) -> {ZONES_PATH}")
 
 
 def main() -> None:

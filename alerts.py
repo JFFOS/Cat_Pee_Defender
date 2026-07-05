@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import signal
 import subprocess
 
 import cv2
@@ -10,20 +11,49 @@ import numpy as np
 import requests
 
 
-def play_sound(sound_path: str) -> None:
-    """Play the alarm through the Mac speakers without blocking the watch loop.
+class Alarm:
+    """A looping alarm that plays until explicitly stopped.
 
-    Uses macOS's built-in `afplay`. Failures are swallowed so a missing sound
-    file or audio hiccup never takes down the watcher.
+    Spawns macOS `afplay` in its own process group and replays the sound on a
+    loop, so the deterrent can run for as long as the cat stays in the danger
+    zone and be silenced the instant it leaves. Non-blocking; failures are
+    swallowed so a missing sound file or audio hiccup never takes down the watcher.
     """
-    try:
-        subprocess.Popen(
-            ["afplay", sound_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:  # pragma: no cover - best effort
-        print(f"[alerts] could not play sound: {exc}")
+
+    def __init__(self, sound_path: str):
+        self.sound_path = sound_path
+        self._proc: subprocess.Popen | None = None
+
+    @property
+    def playing(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self) -> None:
+        if self.playing:
+            return
+        try:
+            # Loop afplay forever; path passed as an argument (not interpolated)
+            # so an odd filename can't break or inject into the command.
+            script = 'f=$1; while true; do afplay "$f"; done'
+            self._proc = subprocess.Popen(
+                ["/bin/sh", "-c", script, "sh", self.sound_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,  # own process group so we can kill afplay too
+            )
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"[alerts] could not start alarm: {exc}")
+            self._proc = None
+
+    def stop(self) -> None:
+        """Silence the alarm immediately (kills the loop and the current afplay)."""
+        if self._proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+        except Exception:  # pragma: no cover - already gone
+            pass
+        self._proc = None
 
 
 def send_discord(webhook_url: str | None, message: str, frame: "np.ndarray | None" = None) -> bool:

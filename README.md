@@ -28,11 +28,9 @@ regardless of lighting.
    ```
    The camera is assumed **fixed**, so zones are saved as absolute pixel
    rectangles in `zones.json` and stay valid until you move the camera.
-   - **Step 1 — UNSAFE (red):** drag box(es) over the sofa / pee danger area.
-     Enter to accept each, Esc to finish.
-   - **Step 2 — SAFE (green, optional):** drag box(es) over floor/water where
-     it's fine. A cat inside a safe box never triggers, even if it overlaps an
-     unsafe box. Press Esc immediately to skip.
+   - **UNSAFE (red):** drag box(es) over the sofa / pee danger area. Enter to
+     accept each, Esc to finish. Overlapping boxes are auto-merged into one clean
+     rectangle at watch time.
 
    This also (re)generates `alarm.wav`.
 
@@ -74,9 +72,10 @@ the cat is around (empty room is never recorded). When the cat leaves the frame
 (after `presence_gap_grace`), the clip is finalized and **uploaded to Discord**.
 
 **Tier 2 — cat in an UNSAFE zone (the deterrent):** if the cat's box center is
-inside an unsafe zone (and not in a safe zone) continuously for `dwell_seconds`,
-the **loud alarm plays and an urgent `🚨` Discord alert** fires, throttled by
-`alert_cooldown_s`.
+inside an unsafe zone continuously for `dwell_seconds` (default 5s), the **loud
+alarm starts looping and keeps playing until the cat leaves** the zone (it stops
+`presence_gap_grace` after the last in-zone sighting). An urgent `🚨` Discord
+alert also fires, throttled by `alert_cooldown_s` so repeats don't spam.
 
 Very long visits are split into chunks of `max_clip_seconds`.
 
@@ -87,6 +86,9 @@ Everything is written under `logs/`:
   dwell_s, snapshot, clip`. Event types: `cat_seen`, `alert`, `clip`.
 - `logs/snapshots/` — a JPEG per event.
 - `logs/clips/` — one compact `.mp4` per visit (downscaled to `clip_width`).
+
+Discord keeps the full archive, so on disk only the newest `keep_recent` (default
+10) snapshots and clips are retained for debugging; older files are auto-deleted.
 
 ## Discord video
 

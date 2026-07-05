@@ -28,11 +28,32 @@ def _stamp() -> str:
     return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def prune_dir(directory: str, pattern: str, keep: int) -> None:
+    """Keep only the `keep` newest files matching `pattern`; delete the rest.
+
+    Discord holds the full archive, so locally we retain just the most recent
+    files for debugging. Safe if fewer than `keep` files exist.
+    """
+    if keep is None or keep <= 0:
+        return
+    files = sorted(
+        Path(directory).glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in files[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def save_snapshot(settings, frame) -> str:
     """Write a snapshot JPEG and return its path."""
     _ensure_dirs(settings)
     path = Path(settings.snapshot_dir) / f"snap_{_stamp()}.jpg"
     cv2.imwrite(str(path), frame)
+    prune_dir(settings.snapshot_dir, "snap_*.jpg", settings.keep_recent)
     return str(path)
 
 
@@ -110,5 +131,7 @@ class ClipRecorder:
             self.writer.release()
             print(f"[{self.label}] finished clip -> {self.path}")
             self.writer = None
+            # Keep only the newest clips locally (the one just finished is newest).
+            prune_dir(self.settings.clip_dir, f"{self.prefix}_*.mp4", self.settings.keep_recent)
             return self.path
         return None
