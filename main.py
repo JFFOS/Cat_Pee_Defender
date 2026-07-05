@@ -65,13 +65,13 @@ def _hm_to_min(s: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def within_active_window(settings: Settings) -> bool:
-    """True if the current local time is inside the daily active window.
+def _within_window(start_hm: str, end_hm: str) -> bool:
+    """True if the current local time is inside a daily [start, end) window.
 
     Handles windows that cross midnight (start > end). If start == end the
-    window is treated as disabled and the watcher runs 24/7.
+    window is treated as disabled (always True / runs 24/7).
     """
-    start, end = _hm_to_min(settings.active_start), _hm_to_min(settings.active_end)
+    start, end = _hm_to_min(start_hm), _hm_to_min(end_hm)
     if start == end:
         return True
     lt = time.localtime()
@@ -79,6 +79,16 @@ def within_active_window(settings: Settings) -> bool:
     if start < end:
         return start <= cur < end
     return cur >= start or cur < end  # overnight window
+
+
+def within_active_window(settings: Settings) -> bool:
+    """True if now is inside the detection + Discord window (active hours)."""
+    return _within_window(settings.active_start, settings.active_end)
+
+
+def within_alarm_window(settings: Settings) -> bool:
+    """True if now is inside the nested window where the loud alarm may play."""
+    return _within_window(settings.alarm_start, settings.alarm_end)
 
 
 def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
@@ -179,7 +189,8 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                   f"({reason}): {path}")
             send_discord_video(dest, msg, path, max_bytes=settings.discord_max_bytes)
 
-    print(f"[watch] running (active {settings.active_start}–{settings.active_end}). "
+    print(f"[watch] running (active {settings.active_start}–{settings.active_end}; "
+          f"alarm {settings.alarm_start}–{settings.alarm_end}). "
           "Press Ctrl-C (or 'q' in the preview window) to stop.")
     was_active = True
     last_heartbeat = 0.0
@@ -229,6 +240,16 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
             if not was_active:
                 print("[watch] active hours resumed; watching.")
                 was_active = True
+
+            # Alarm is only allowed to sound inside the nested alarm window. If we
+            # cross out of it while the cat lingers, silence the loop but keep
+            # detecting and alerting Discord.
+            alarm_allowed = not no_sound and within_alarm_window(settings)
+            if alarm.playing and not alarm_allowed:
+                alarm.stop()
+                print("[watch] outside alarm hours "
+                      f"({settings.alarm_start}–{settings.alarm_end}); "
+                      "alarm silenced (still alerting Discord).")
 
             frame_i += 1
             detections: list[tuple] = []
@@ -309,8 +330,9 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 if unsafe_since is not None:
                     dwell = now - unsafe_since
                     if dwell >= settings.dwell_seconds:
-                        # Keep the loud deterrent looping for as long as the cat stays.
-                        if not no_sound and not alarm.playing:
+                        # Keep the loud deterrent looping for as long as the cat
+                        # stays — but only during the nested alarm-sound window.
+                        if alarm_allowed and not alarm.playing:
                             print("[watch] ALARM: looping until the cat leaves the zone.")
                             alarm.start()
                         # Discord alert + logged snapshot, throttled so we don't spam.

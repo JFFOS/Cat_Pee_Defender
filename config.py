@@ -50,21 +50,34 @@ class Settings:
     camera_index: int = 0
 
     # Detection
-    conf_threshold: float = 0.40      # min YOLO confidence to count a cat
+    conf_threshold: float = 0.50      # min YOLO confidence to count a cat
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)
 
     # Dwell / alert logic
     dwell_seconds: float = 1.0        # continuous in-zone time before firing
-    presence_gap_grace: float = 1.5   # tolerate detection dropouts up to this long
+    # How long a detection dropout is bridged before a visit is considered over.
+    # This is the gap between "cat" and "no cat" frames: while the cat briefly
+    # turns, is occluded, or is missed by a frame, the visit (and its single clip)
+    # stays alive instead of ending and re-firing "cat spotted" on return. Higher
+    # = fewer split clips and less Discord spam, at the cost of a little extra
+    # empty footage tacked onto each clip.
+    presence_gap_grace: float = 4.0   # was 1.5s (too short — chopped visits apart)
     alert_cooldown_s: float = 60.0    # min gap between two Discord alerts (sound loops regardless)
 
-    # Active hours — the watcher only detects & alarms within this daily window
-    # (local time, 24-hour "HH:MM"). Outside it, it idles quietly. Set both the
-    # same value (e.g. "00:00"/"00:00") to disable the limit and watch 24/7.
-    active_start: str = "09:30"       # <-- change to move the start of watching
-    active_end: str = "22:00"         # <-- change to move the end (22:00 = 10:00pm)
+    # Active hours — the watcher detects and sends Discord alerts within this daily
+    # window (local time, 24-hour "HH:MM"). Outside it, it idles quietly. Windows
+    # that cross midnight are fine (start > end). Set both the same value
+    # (e.g. "00:00"/"00:00") to disable the limit and watch 24/7.
+    active_start: str = "06:00"       # <-- detection + Discord start
+    active_end: str = "01:00"         # <-- detection + Discord end (overnight: 6am -> 1am)
+
+    # Alarm-sound hours — a *nested* window (also local "HH:MM") inside the active
+    # hours where the loud local alarm is allowed to play. Outside it (but still
+    # inside active hours) the cat is detected and Discord is alerted silently.
+    alarm_start: str = "09:30"        # <-- loud alarm allowed from here
+    alarm_end: str = "22:00"          # <-- ...until here (22:00 = 10:00pm)
     heartbeat_s: float = 60.0         # print an "alive" status line this often (headless log)
 
     # Recording — a clip holds only the frames where the cat is in an unsafe zone,
