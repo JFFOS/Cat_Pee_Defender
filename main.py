@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from alerts import Alarm, send_discord, send_discord_video
 from config import CAT_CLASS_ID, Settings
@@ -58,44 +59,6 @@ def scale_boxes(boxes: list[dict], ref_w, ref_h, cur_w: int, cur_h: int) -> list
     ]
 
 
-def _boxes_overlap(a: dict, b: dict) -> bool:
-    return not (
-        a["x"] + a["w"] < b["x"] or b["x"] + b["w"] < a["x"]
-        or a["y"] + a["h"] < b["y"] or b["y"] + b["h"] < a["y"]
-    )
-
-
-def _union_box(a: dict, b: dict) -> dict:
-    x1, y1 = min(a["x"], b["x"]), min(a["y"], b["y"])
-    x2 = max(a["x"] + a["w"], b["x"] + b["w"])
-    y2 = max(a["y"] + a["h"], b["y"] + b["h"])
-    return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
-
-
-def merge_boxes(boxes: list[dict]) -> list[dict]:
-    """Collapse overlapping rectangles into their union bounding box.
-
-    Repeats until no two remaining boxes overlap, so a chain of overlapping
-    danger areas becomes one clean rectangle for a cleaner overlay.
-    """
-    boxes = [dict(b) for b in boxes]
-    changed = True
-    while changed:
-        changed = False
-        out: list[dict] = []
-        for cur in boxes:
-            i = 0
-            while i < len(out):
-                if _boxes_overlap(cur, out[i]):
-                    cur = _union_box(cur, out.pop(i))
-                    changed = True
-                else:
-                    i += 1
-            out.append(cur)
-        boxes = out
-    return boxes
-
-
 def _hm_to_min(s: str) -> int:
     """Parse an 'HH:MM' string into minutes since midnight."""
     h, m = s.split(":")
@@ -127,8 +90,17 @@ def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
 
 def draw_overlay(frame, unsafe: list[dict],
                  detections: list[tuple], in_zone: bool, recording: bool = False):
-    for b in unsafe:
-        cv2.rectangle(frame, (b["x"], b["y"]), (b["x"] + b["w"], b["y"] + b["h"]), (0, 0, 255), 2)
+    # Draw the unsafe zones as a single outline around their combined shape:
+    # overlapping rects merge into one contour (no inner lines), while keeping
+    # the true footprint instead of one big bounding box.
+    if unsafe:
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        for b in unsafe:
+            cv2.rectangle(mask, (b["x"], b["y"]),
+                          (b["x"] + b["w"], b["y"] + b["h"]), 255, -1)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(frame, contours, -1, (0, 0, 255), 2)
     for (x1, y1, x2, y2, conf, hit) in detections:
         color = (0, 0, 255) if hit else (0, 200, 0)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -148,10 +120,6 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     from ultralytics import YOLO
 
     unsafe_boxes, ref_w, ref_h = load_zones(settings)
-    raw_unsafe = len(unsafe_boxes)
-    unsafe_boxes = merge_boxes(unsafe_boxes)
-    if len(unsafe_boxes) != raw_unsafe:
-        print(f"[watch] merged {raw_unsafe} overlapping unsafe box(es) -> {len(unsafe_boxes)}")
     print(f"[watch] loaded {len(unsafe_boxes)} unsafe zone(s)")
 
     print(f"[watch] loading model on device={settings.device} ...")
