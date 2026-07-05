@@ -96,6 +96,28 @@ def merge_boxes(boxes: list[dict]) -> list[dict]:
     return boxes
 
 
+def _hm_to_min(s: str) -> int:
+    """Parse an 'HH:MM' string into minutes since midnight."""
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def within_active_window(settings: Settings) -> bool:
+    """True if the current local time is inside the daily active window.
+
+    Handles windows that cross midnight (start > end). If start == end the
+    window is treated as disabled and the watcher runs 24/7.
+    """
+    start, end = _hm_to_min(settings.active_start), _hm_to_min(settings.active_end)
+    if start == end:
+        return True
+    lt = time.localtime()
+    cur = lt.tm_hour * 60 + lt.tm_min
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end  # overnight window
+
+
 def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     for b in boxes:
         if b["x"] <= px <= b["x"] + b["w"] and b["y"] <= py <= b["y"] + b["h"]:
@@ -160,21 +182,25 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     last_seen_unsafe: float = 0.0
     last_alert: float = -1e9
     event_max_conf: float = 0.0          # best confidence seen during this visit
+    event_seg: int = 0                   # segment index within the current visit (part N)
     unsafe = unsafe_boxes
     alarm = Alarm(settings.sound_path)   # loops while the cat is in the unsafe zone
 
     def finalize_clip(path: str | None, reason: str) -> None:
-        """Log the finished visit clip and upload it to Discord."""
+        """Log the finished visit clip segment and upload it to Discord."""
         if not path:
             return
         dwell = (last_seen_present - present_since) if present_since else 0.0
         append_event(settings, "clip", "any", event_max_conf, max(dwell, 0.0), clip=path)
         if settings.discord_video:
-            msg = f"🎥 Cat visit clip ({reason}). conf={event_max_conf:.2f}"
-            print(f"[watch] uploading visit clip to Discord: {path}")
+            msg = f"🎥 Cat visit — part {event_seg} (conf {event_max_conf:.2f})"
+            print(f"[watch] uploading clip part {event_seg} to Discord ({reason}): {path}")
             send_discord_video(webhook, msg, path, max_bytes=settings.discord_max_bytes)
 
-    print("[watch] running. Press Ctrl-C (or 'q' in the preview window) to stop.")
+    print(f"[watch] running (active {settings.active_start}–{settings.active_end}). "
+          "Press Ctrl-C (or 'q' in the preview window) to stop.")
+    was_active = True
+    last_heartbeat = 0.0
     try:
         while True:
             ok, frame = cap.read()
@@ -185,8 +211,44 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 time.sleep(0.05)
                 continue
 
-            frame_i += 1
             now = time.time()
+
+            # --- Heartbeat: periodic "still alive" line for the headless log ---
+            if now - last_heartbeat >= settings.heartbeat_s:
+                active = within_active_window(settings)
+                if active:
+                    state = "cat present" if present_since is not None else "watching, no cat"
+                else:
+                    state = f"idle (off-hours, active {settings.active_start}-{settings.active_end})"
+                print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} alive — {state}",
+                      flush=True)
+                last_heartbeat = now
+
+            # --- Active-hours gate: outside the window, idle quietly ---
+            if not within_active_window(settings):
+                if was_active:  # just crossed into off-hours: silence + wrap up
+                    alarm.stop()
+                    if present_since is not None:
+                        finalize_clip(event_rec.stop(), "off-hours")
+                        present_since = None
+                    unsafe_since = None
+                    print(f"[watch] outside active hours ({settings.active_start}–"
+                          f"{settings.active_end}); idling.")
+                    was_active = False
+                if show:
+                    idle = frame.copy()
+                    cv2.putText(idle, f"IDLE (active {settings.active_start}-{settings.active_end})",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (160, 160, 160), 2)
+                    cv2.imshow("Cat Watch (q to quit)", idle)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+                time.sleep(0.5)
+                continue
+            if not was_active:
+                print("[watch] active hours resumed; watching.")
+                was_active = True
+
+            frame_i += 1
             detections: list[tuple] = []
             cat_in_unsafe = False
 
@@ -231,6 +293,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     if present_since is None:  # start of a new visit
                         present_since = now
                         event_max_conf = best_conf_any
+                        event_seg = 1
                         print("[watch] cat spotted; recording visit.")
                         snapshot = draw_overlay(frame.copy(), unsafe, detections,
                                                 cat_in_unsafe)
@@ -284,9 +347,10 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
             if present_since is not None and event_rec.active:
                 event_rec.write(draw_overlay(frame.copy(), unsafe, detections,
                                              cat_in_unsafe, recording=True))
-                capped = event_rec.maybe_finish(now)  # split very long visits
+                capped = event_rec.maybe_finish(now)  # split long visits into parts
                 if capped:
-                    finalize_clip(capped, "still present, split clip")
+                    finalize_clip(capped, "segment full")
+                    event_seg += 1
                     event_rec.start(frame, now)
 
             if show:

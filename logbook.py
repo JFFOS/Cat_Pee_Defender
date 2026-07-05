@@ -90,6 +90,7 @@ class ClipRecorder:
         self.prefix = prefix
         self.label = label
         self.writer: cv2.VideoWriter | None = None
+        self.codec: str = "mp4v"
         self.path: str | None = None
         self.until: float = 0.0
         self._out_size: tuple[int, int] | None = None
@@ -104,16 +105,30 @@ class ClipRecorder:
             frame = cv2.resize(frame, (self.max_width, int(frame.shape[0] * scale)))
         return frame
 
+    def _open_writer(self, w: int, h: int) -> cv2.VideoWriter:
+        """Prefer H.264 (avc1) for far smaller files; fall back to mp4v if the
+        OpenCV/FFmpeg build can't open an H.264 writer."""
+        for codec in ("avc1", "mp4v"):
+            writer = cv2.VideoWriter(
+                self.path, cv2.VideoWriter_fourcc(*codec), self.fps, (w, h)
+            )
+            if writer.isOpened():
+                self.codec = codec
+                return writer
+            writer.release()
+        # Last resort: return the (unopened) mp4v writer so write() just no-ops.
+        self.codec = "mp4v"
+        return cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
+
     def start(self, frame, now: float) -> str:
         _ensure_dirs(self.settings)
         out = self._resize(frame)
         h, w = out.shape[:2]
         self._out_size = (w, h)
         self.path = str(Path(self.settings.clip_dir) / f"{self.prefix}_{_stamp()}.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(self.path, fourcc, self.fps, (w, h))
+        self.writer = self._open_writer(w, h)
         self.until = now + self.seconds
-        print(f"[{self.label}] started {self.seconds:.0f}s clip -> {self.path}")
+        print(f"[{self.label}] started {self.seconds:.0f}s {self.codec} clip -> {self.path}")
         return self.path
 
     def write(self, frame) -> None:

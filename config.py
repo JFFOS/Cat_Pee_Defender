@@ -60,11 +60,19 @@ class Settings:
     presence_gap_grace: float = 1.5   # tolerate detection dropouts up to this long
     alert_cooldown_s: float = 60.0    # min gap between two Discord alerts (sound loops regardless)
 
+    # Active hours — the watcher only detects & alarms within this daily window
+    # (local time, 24-hour "HH:MM"). Outside it, it idles quietly. Set both the
+    # same value (e.g. "00:00"/"00:00") to disable the limit and watch 24/7.
+    active_start: str = "09:30"       # <-- change to move the start of watching
+    active_end: str = "22:00"         # <-- change to move the end (22:00 = 10:00pm)
+    heartbeat_s: float = 60.0         # print an "alive" status line this often (headless log)
+
     # Recording — a clip holds only the frames where the cat is in an unsafe zone,
-    # packed together (empty room is never recorded). One clip per visit.
-    clip_width: int = 960             # downscale width (smaller = lighter files)
+    # packed together (empty room is never recorded). A long visit is split into
+    # short segments so each part stays small enough to upload to Discord.
+    clip_width: int = 960             # downscale width (H.264 keeps these small)
     clip_fps: float = 12.0            # playback fps for saved clips
-    max_clip_seconds: float = 300.0   # safety cap; a longer visit is split into chunks
+    max_clip_seconds: float = 60.0    # cap per segment; long visits upload as parts 1..N
 
     # Discord video
     discord_video: bool = True        # upload the event clip to Discord

@@ -46,6 +46,27 @@ python main.py --show          # live watch with a preview window
 python main.py                 # live watch, headless
 ```
 
+### One-click / autostart (macOS)
+
+- **Double-click `run_watcher.command`** in Finder to start the watcher headless
+  in the background (it keeps running after the window closes; logs to
+  `logs/watcher.log`). Running it again while it's up is a safe no-op.
+- **Double-click `stop_watcher.command`** to stop it.
+- **Autostart at login:** System Settings ▸ General ▸ Login Items ▸ **＋** and add
+  `run_watcher.command`.
+
+Both scripts call the `Cat_pee` conda interpreter directly; edit the `PY=` line in
+`run_watcher.command` if your Python lives elsewhere. (Terminal needs Camera
+permission for the headless run.)
+
+### Active hours
+
+By default the watcher only detects & alarms between **09:30 and 22:00** (local
+time); outside that window it idles quietly. Change `active_start` / `active_end`
+in `config.py` (24-hour `"HH:MM"`), or set them equal to run 24/7. A heartbeat
+line (`[watch] HH:MM:SS alive — …`) is printed every `heartbeat_s` seconds so the
+headless log shows it's alive.
+
 The first run auto-downloads the YOLOv8m weights (`yolov8m.pt`, ~50 MB). The
 medium model is used because the nano/small models missed the small, blurry cat
 on the real wide-angle webcam frames, while `yolov8m` detects it reliably at
@@ -61,7 +82,8 @@ python main.py --source clip.mp4 --show  # run against a recorded video
 ```
 
 Tune behavior in `config.py`: `dwell_seconds`, `conf_threshold`,
-`alert_cooldown_s`, `process_every_n`, `infer_imgsz`.
+`alert_cooldown_s`, `process_every_n`, `infer_imgsz`, `active_start`/`active_end`,
+`heartbeat_s`.
 
 ## How it works — two tiers
 
