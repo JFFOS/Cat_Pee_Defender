@@ -1,0 +1,10 @@
+.env
+zones.json
+logs/
+cat_image/
+*.wav
+yolov8n.pt
+*.pt
+__pycache__/
+*.pyc
+.idea/
