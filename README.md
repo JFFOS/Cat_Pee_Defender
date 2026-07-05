@@ -34,10 +34,15 @@ regardless of lighting.
 
    This also (re)generates `alarm.wav`.
 
-4. **Configure Discord**: copy `.env.example` to `.env` and paste your webhook URL:
+4. **Configure Discord**: copy `.env.example` to `.env` and paste your webhook URL(s):
    ```bash
    cp .env.example .env
    ```
+
+   Two channels are supported so you can mute the chatty one:
+   - `DISCORD_WEBHOOK_URL` — **normal** activity (cat spotted anywhere + visit clips).
+   - `DISCORD_URGENT_WEBHOOK_URL` — **urgent** unsafe-zone alerts (cat on the sofa).
+     Optional; if unset, urgent alerts fall back to the normal webhook.
 
 ## Run
 

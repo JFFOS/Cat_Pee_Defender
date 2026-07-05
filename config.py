@@ -93,3 +93,12 @@ class Settings:
     @property
     def discord_webhook_url(self) -> str | None:
         return os.environ.get("DISCORD_WEBHOOK_URL")
+
+    @property
+    def discord_urgent_webhook_url(self) -> str | None:
+        """Webhook for urgent unsafe-zone alerts.
+
+        Routed to a separate channel so the normal "cat spotted" channel can be
+        muted while these stay noisy. Falls back to the normal webhook if unset.
+        """
+        return os.environ.get("DISCORD_URGENT_WEBHOOK_URL") or self.discord_webhook_url

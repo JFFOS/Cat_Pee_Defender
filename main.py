@@ -164,9 +164,12 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
             "Terminal/PyCharm has Camera permission (System Settings -> Privacy & Security -> Camera)."
         )
 
-    webhook = settings.discord_webhook_url
+    webhook = settings.discord_webhook_url            # normal activity (spotted + clips)
+    urgent_webhook = settings.discord_urgent_webhook_url  # unsafe-zone alerts
     if not webhook:
         print("[watch] WARNING: DISCORD_WEBHOOK_URL not set; alerts will be sound-only.")
+    elif urgent_webhook != webhook:
+        print("[watch] urgent unsafe-zone alerts routed to a separate Discord channel.")
 
     # One clip per visit: records only the frames where the cat is in an unsafe zone.
     event_rec = ClipRecorder(
@@ -338,7 +341,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                             print(f"[watch] ALERT: {msg}")
                             snapshot = draw_overlay(frame.copy(), unsafe, detections, True)
                             snap_path = save_snapshot(settings, snapshot)
-                            send_discord(webhook, msg, snapshot)
+                            send_discord(urgent_webhook, msg, snapshot)
                             append_event(settings, "alert", "sofa", best_conf_unsafe, dwell,
                                          snapshot=snap_path, clip=event_rec.path or "")
                             last_alert = now
@@ -389,9 +392,14 @@ def main() -> None:
         return
 
     if args.test_discord:
-        print("[test] sending test Discord alert...")
-        ok = send_discord(settings.discord_webhook_url, "✅ Cat watcher test alert (no image).")
+        print("[test] sending test Discord alert to the normal channel...")
+        ok = send_discord(settings.discord_webhook_url, "✅ Cat watcher test alert (normal channel).")
         print("[test] sent." if ok else "[test] failed — check DISCORD_WEBHOOK_URL in .env.")
+        urgent = settings.discord_urgent_webhook_url
+        if urgent and urgent != settings.discord_webhook_url:
+            print("[test] sending test Discord alert to the urgent channel...")
+            ok_u = send_discord(urgent, "🚨 Cat watcher test alert (urgent channel).")
+            print("[test] sent." if ok_u else "[test] failed — check DISCORD_URGENT_WEBHOOK_URL in .env.")
         return
 
     source = args.source if args.source else settings.camera_index
