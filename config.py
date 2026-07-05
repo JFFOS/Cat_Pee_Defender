@@ -56,7 +56,7 @@ class Settings:
     device: str = field(default_factory=_auto_device)
 
     # Dwell / alert logic
-    dwell_seconds: float = 2.0        # continuous in-zone time before firing
+    dwell_seconds: float = 1.0        # continuous in-zone time before firing
     presence_gap_grace: float = 1.5   # tolerate detection dropouts up to this long
     alert_cooldown_s: float = 60.0    # min gap between two Discord alerts (sound loops regardless)
 

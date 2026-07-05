@@ -186,6 +186,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     last_alert: float = -1e9
     event_max_conf: float = 0.0          # best confidence seen during this visit
     event_seg: int = 0                   # segment index within the current visit (part N)
+    event_unsafe: bool = False           # did the cat enter an unsafe zone during this visit?
     unsafe = unsafe_boxes
     alarm = Alarm(settings.sound_path)   # loops while the cat is in the unsafe zone
 
@@ -196,9 +197,19 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
         dwell = (last_seen_present - present_since) if present_since else 0.0
         append_event(settings, "clip", "any", event_max_conf, max(dwell, 0.0), clip=path)
         if settings.discord_video:
-            msg = f"🎥 Cat visit — part {event_seg} (conf {event_max_conf:.2f})"
-            print(f"[watch] uploading clip part {event_seg} to Discord ({reason}): {path}")
-            send_discord_video(webhook, msg, path, max_bytes=settings.discord_max_bytes)
+            # Visits that touched an unsafe zone go to the urgent channel; plain
+            # "passed by" visits stay on the normal channel.
+            if event_unsafe:
+                dest = urgent_webhook
+                msg = f"🚨🎥 Cat in UNSAFE zone — part {event_seg} (conf {event_max_conf:.2f})"
+                channel = "urgent"
+            else:
+                dest = webhook
+                msg = f"🎥 Cat visit — part {event_seg} (conf {event_max_conf:.2f})"
+                channel = "normal"
+            print(f"[watch] uploading clip part {event_seg} to Discord {channel} channel "
+                  f"({reason}): {path}")
+            send_discord_video(dest, msg, path, max_bytes=settings.discord_max_bytes)
 
     print(f"[watch] running (active {settings.active_start}–{settings.active_end}). "
           "Press Ctrl-C (or 'q' in the preview window) to stop.")
@@ -297,6 +308,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                         present_since = now
                         event_max_conf = best_conf_any
                         event_seg = 1
+                        event_unsafe = False
                         print("[watch] cat spotted; recording visit.")
                         snapshot = draw_overlay(frame.copy(), unsafe, detections,
                                                 cat_in_unsafe)
@@ -315,6 +327,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 # --- TIER 2: cat in an UNSAFE zone -> loud deterrent + urgent alert ---
                 if cat_in_unsafe:
                     last_seen_unsafe = now
+                    event_unsafe = True  # this visit's clip routes to the urgent channel
                     if unsafe_since is None:
                         unsafe_since = now
                 elif unsafe_since is not None:
