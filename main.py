@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from alerts import Alarm, send_discord, send_discord_video
-from config import CAT_CLASS_ID, Settings
+from config import CAT_CLASS_ID, PERSON_CLASS_ID, Settings
 from logbook import ClipRecorder, append_event, save_snapshot
 
 
@@ -98,6 +98,50 @@ def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     return False
 
 
+def _rect_overlaps_box(x1: int, y1: int, x2: int, y2: int, b: dict) -> bool:
+    """True if the axis-aligned rect [x1,y1,x2,y2] overlaps unsafe box `b`."""
+    return not (
+        x2 < b["x"] or x1 > b["x"] + b["w"] or
+        y2 < b["y"] or y1 > b["y"] + b["h"]
+    )
+
+
+def zone_ids_of_boxes(boxes: list[dict]) -> list[int]:
+    """Group unsafe boxes into distinct danger zones and return a zone id per box.
+
+    Two boxes that overlap belong to the same zone (they merge into one outline
+    in the overlay), so their zone ids are equal. Disjoint boxes get different
+    ids. Used to tell whether a cat and a human are in the *same* zone.
+    """
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        bi = boxes[i]
+        for j in range(i + 1, n):
+            bj = boxes[j]
+            if _rect_overlaps_box(bi["x"], bi["y"], bi["x"] + bi["w"],
+                                  bi["y"] + bi["h"], bj):
+                parent[find(i)] = find(j)
+    return [find(i) for i in range(n)]
+
+
+def rect_zone_ids(x1: int, y1: int, x2: int, y2: int,
+                  boxes: list[dict], zone_id: list[int]) -> set[int]:
+    """Set of danger-zone ids whose boxes the detection rect overlaps."""
+    return {
+        zone_id[i]
+        for i, b in enumerate(boxes)
+        if _rect_overlaps_box(x1, y1, x2, y2, b)
+    }
+
+
 def draw_overlay(frame, unsafe: list[dict],
                  detections: list[tuple], in_zone: bool, recording: bool = False):
     # Draw the unsafe zones as a single outline around their combined shape:
@@ -111,10 +155,15 @@ def draw_overlay(frame, unsafe: list[dict],
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(frame, contours, -1, (0, 0, 255), 2)
-    for (x1, y1, x2, y2, conf, hit) in detections:
-        color = (0, 0, 255) if hit else (0, 200, 0)
+    for (x1, y1, x2, y2, conf, hit, is_cat) in detections:
+        if is_cat:
+            color = (0, 0, 255) if hit else (0, 200, 0)  # red in-zone, green otherwise
+            label = f"cat {conf:.2f}"
+        else:
+            color = (255, 160, 0)  # blue for people
+            label = f"person {conf:.2f}"
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"cat {conf:.2f}", (x1, max(0, y1 - 6)),
+        cv2.putText(frame, label, (x1, max(0, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     if in_zone:
         cv2.putText(frame, "CAT IN UNSAFE ZONE", (10, 30),
@@ -153,6 +202,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     event_rec = ClipRecorder(
         settings, seconds=settings.max_clip_seconds, fps=settings.clip_fps,
         max_width=settings.clip_width, prefix="event", label="rec",
+        preroll=settings.clip_preroll_seconds,
     )
     frame_i = 0
     # Visit = cat present anywhere in frame (this is the "cat passed by" tier).
@@ -241,6 +291,10 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 print("[watch] active hours resumed; watching.")
                 was_active = True
 
+            # Keep the last few seconds on hand so a visit clip can begin a bit
+            # before the cat is first spotted (pre-roll).
+            event_rec.buffer(frame, now)
+
             # Alarm is only allowed to sound inside the nested alarm window. If we
             # cross out of it while the cat lingers, silence the loop but keep
             # detecting and alerting Discord.
@@ -263,29 +317,49 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     frame,
                     imgsz=settings.infer_imgsz,
                     conf=settings.conf_threshold,
-                    classes=[CAT_CLASS_ID],
+                    classes=[PERSON_CLASS_ID, CAT_CLASS_ID],
                     device=settings.device,
                     verbose=False,
                 )
+                zone_id = zone_ids_of_boxes(unsafe)  # group id per unsafe box
+                cat_zone_ids: set[int] = set()       # zones a cat sits in
+                human_zone_ids: set[int] = set()     # zones a human sits in
                 for r in results:
                     for box in r.boxes:
+                        is_cat = int(box.cls[0]) == CAT_CLASS_ID
                         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
                         conf = float(box.conf[0])
                         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                         hit = point_in_boxes(cx, cy, unsafe)
-                        detections.append((x1, y1, x2, y2, conf, hit))
-                        if hit:
-                            cat_in_unsafe = True
+                        detections.append((x1, y1, x2, y2, conf, hit, is_cat))
+                        if is_cat:
+                            if hit:
+                                cat_in_unsafe = True
+                                cat_zone_ids |= rect_zone_ids(x1, y1, x2, y2, unsafe, zone_id)
+                        else:  # human: which danger zone(s) does their box overlap?
+                            human_zone_ids |= rect_zone_ids(x1, y1, x2, y2, unsafe, zone_id)
 
-                cat_present = len(detections) > 0
-                best_conf_any = max((d[4] for d in detections), default=0.0)
-                best_conf_unsafe = max((d[4] for d in detections if d[5]), default=0.0)
+                cats = [d for d in detections if d[6]]
+                humans = [d for d in detections if not d[6]]
+                cat_present = len(cats) > 0
+                best_conf_any = max((d[4] for d in cats), default=0.0)
+                best_conf_unsafe = max((d[4] for d in cats if d[5]), default=0.0)
+                # Human in the SAME danger zone as the cat => likely playing: suppress
+                # the alarm (but still alert Discord). Different zones => alarm stays.
+                companion = (
+                    settings.suppress_alarm_with_human
+                    and bool(cat_zone_ids & human_zone_ids)
+                )
 
                 if cat_present:
                     zone_note = " [UNSAFE ZONE]" if cat_in_unsafe else ""
+                    human_note = (
+                        " +human(same zone)" if companion
+                        else " +human" if humans else ""
+                    )
                     print(
-                        f"[detect] {len(detections)} cat(s) conf={best_conf_any:.2f}"
-                        f"{zone_note}",
+                        f"[detect] {len(cats)} cat(s){human_note} "
+                        f"conf={best_conf_any:.2f}{zone_note}",
                         flush=True,
                     )
 
@@ -330,22 +404,38 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 if unsafe_since is not None:
                     dwell = now - unsafe_since
                     if dwell >= settings.dwell_seconds:
-                        # Keep the loud deterrent looping for as long as the cat
-                        # stays — but only during the nested alarm-sound window.
-                        if alarm_allowed and not alarm.playing:
+                        if companion:
+                            # A human shares the cat's zone — almost certainly
+                            # playing with it. Stay quiet (silence if already loud).
+                            if alarm.playing:
+                                alarm.stop()
+                                print("[watch] human in the cat's zone; alarm suppressed "
+                                      "(likely playing).")
+                        elif alarm_allowed and not alarm.playing:
+                            # Keep the loud deterrent looping for as long as the cat
+                            # stays — but only during the nested alarm-sound window.
                             print("[watch] ALARM: looping until the cat leaves the zone.")
                             alarm.start()
                         # Discord alert + logged snapshot, throttled so we don't spam.
                         if (now - last_alert) >= settings.alert_cooldown_s:
-                            msg = (
-                                f"🚨 Cat on the sofa (UNSAFE zone) for {int(dwell)}s! "
-                                f"conf={best_conf_unsafe:.2f}"
-                            )
+                            if companion:
+                                msg = (
+                                    f"🐾🧑 Cat + human together in the UNSAFE zone for "
+                                    f"{int(dwell)}s (likely playing) — alarm off. "
+                                    f"conf={best_conf_unsafe:.2f}"
+                                )
+                                event_name = "companion"
+                            else:
+                                msg = (
+                                    f"🚨 Cat on the sofa (UNSAFE zone) for {int(dwell)}s! "
+                                    f"conf={best_conf_unsafe:.2f}"
+                                )
+                                event_name = "alert"
                             print(f"[watch] ALERT: {msg}")
                             snapshot = draw_overlay(frame.copy(), unsafe, detections, True)
                             snap_path = save_snapshot(settings, snapshot)
                             send_discord(urgent_webhook, msg, snapshot)
-                            append_event(settings, "alert", "sofa", best_conf_unsafe, dwell,
+                            append_event(settings, event_name, "sofa", best_conf_unsafe, dwell,
                                          snapshot=snap_path, clip=event_rec.path or "")
                             last_alert = now
 
@@ -357,7 +447,9 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 if capped:
                     finalize_clip(capped, "segment full")
                     event_seg += 1
-                    event_rec.start(frame, now)
+                    # Continuation segment picks up exactly where part N ended —
+                    # no pre-roll (that would duplicate the tail of the prior part).
+                    event_rec.start(frame, now, include_preroll=False)
 
             if show:
                 view = draw_overlay(frame.copy(), unsafe, detections,

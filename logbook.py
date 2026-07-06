@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -82,18 +83,23 @@ class ClipRecorder:
     """
 
     def __init__(self, settings, seconds: float | None = None, fps: float | None = None,
-                 max_width: int | None = None, prefix: str = "clip", label: str = "rec"):
+                 max_width: int | None = None, prefix: str = "clip", label: str = "rec",
+                 preroll: float | None = None):
         self.settings = settings
         self.seconds = seconds if seconds is not None else settings.record_seconds
         self.fps = fps if fps is not None else settings.record_fps
         self.max_width = max_width
         self.prefix = prefix
         self.label = label
+        self.preroll = preroll if preroll is not None else 0.0
         self.writer: cv2.VideoWriter | None = None
         self.codec: str = "mp4v"
         self.path: str | None = None
         self.until: float = 0.0
         self._out_size: tuple[int, int] | None = None
+        # Rolling buffer of recent (timestamp, resized frame) so a clip can begin
+        # `preroll` seconds before the cat is spotted. Fed via buffer() every loop.
+        self._preroll_buf: deque[tuple[float, "cv2.Mat"]] = deque()
 
     @property
     def active(self) -> bool:
@@ -120,7 +126,17 @@ class ClipRecorder:
         self.codec = "mp4v"
         return cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
 
-    def start(self, frame, now: float) -> str:
+    def buffer(self, frame, now: float) -> None:
+        """Keep the last `preroll` seconds of frames on hand so start() can
+        prepend them. Call every loop while watching (cheap: one resize + prune)."""
+        if self.preroll <= 0:
+            return
+        self._preroll_buf.append((now, self._resize(frame)))
+        cutoff = now - self.preroll
+        while self._preroll_buf and self._preroll_buf[0][0] < cutoff:
+            self._preroll_buf.popleft()
+
+    def start(self, frame, now: float, include_preroll: bool = True) -> str:
         _ensure_dirs(self.settings)
         out = self._resize(frame)
         h, w = out.shape[:2]
@@ -128,7 +144,18 @@ class ClipRecorder:
         self.path = str(Path(self.settings.clip_dir) / f"{self.prefix}_{_stamp()}.mp4")
         self.writer = self._open_writer(w, h)
         self.until = now + self.seconds
-        print(f"[{self.label}] started {self.seconds:.0f}s {self.codec} clip -> {self.path}")
+        pre_n = 0
+        if include_preroll and self.preroll > 0:
+            cutoff = now - self.preroll
+            # Only frames that match the writer's dimensions (guards against a
+            # mid-run resolution change) get flushed as pre-roll.
+            for ts, buf_frame in self._preroll_buf:
+                if ts >= cutoff and (buf_frame.shape[1], buf_frame.shape[0]) == (w, h):
+                    self.writer.write(buf_frame)
+                    pre_n += 1
+        pre_note = f" (+{pre_n} pre-roll frames)" if pre_n else ""
+        print(f"[{self.label}] started {self.seconds:.0f}s {self.codec} clip{pre_note} "
+              f"-> {self.path}")
         return self.path
 
     def write(self, frame) -> None:

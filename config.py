@@ -28,8 +28,9 @@ EVENTS_CSV = LOG_DIR / "events.csv"
 SNAPSHOT_DIR = LOG_DIR / "snapshots"
 CLIP_DIR = LOG_DIR / "clips"
 
-# COCO class index for "cat".
+# COCO class indices.
 CAT_CLASS_ID = 15
+PERSON_CLASS_ID = 0
 
 
 def _auto_device() -> str:
@@ -54,6 +55,11 @@ class Settings:
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)
+
+    # If a human shares the same danger zone as the cat, assume they're playing
+    # with it: skip the loud alarm but still send the Discord alert. A human in a
+    # *different* zone than the cat does not suppress the alarm.
+    suppress_alarm_with_human: bool = True
 
     # Dwell / alert logic
     dwell_seconds: float = 1.0        # continuous in-zone time before firing
@@ -86,6 +92,7 @@ class Settings:
     clip_width: int = 960             # downscale width (H.264 keeps these small)
     clip_fps: float = 12.0            # playback fps for saved clips
     max_clip_seconds: float = 60.0    # cap per segment; long visits upload as parts 1..N
+    clip_preroll_seconds: float = 4.0  # footage kept before T+0 (the moment the cat is spotted)
 
     # Discord video
     discord_video: bool = True        # upload the event clip to Discord
