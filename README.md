@@ -110,7 +110,7 @@ Very long visits are split into chunks of `max_clip_seconds`.
 
 Everything is written under `logs/`:
 - `logs/events.csv` — one row per event: `timestamp, event, zone, confidence,
-  dwell_s, snapshot, clip`. Event types: `cat_seen`, `alert`, `clip`.
+  dwell_s, snapshot, clip`. Event types: `cat_seen`, `alert`, `companion`, `clip`.
 - `logs/snapshots/` — a JPEG per event.
 - `logs/clips/` — one compact `.mp4` per visit (downscaled to `clip_width`).
 
@@ -127,3 +127,13 @@ video uploads entirely.
 
 > Note: this detects the cat *being on the sofa*, a practical proxy for "about to
 > pee." It does not classify the peeing posture itself.
+
+## License
+
+Licensed under the **GNU Affero General Public License v3.0** — see [`LICENSE`](LICENSE).
+
+This project depends on [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics),
+which is itself AGPL-3.0. That is why this project is AGPL-3.0: if you distribute it
+or run it as a network service, you must make your source (including modifications)
+available under the same license. If you need to use it under different terms,
+obtain an [Ultralytics Enterprise License](https://www.ultralytics.com/license).
