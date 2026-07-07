@@ -212,6 +212,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     unsafe_since: float | None = None
     last_seen_unsafe: float = 0.0
     last_alert: float = -1e9
+    last_companion: float = -1e9         # last time a human shared the cat's zone (companion suppression)
     event_max_conf: float = 0.0          # best confidence seen during this visit
     event_seg: int = 0                   # segment index within the current visit (part N)
     event_unsafe: bool = False           # did the cat enter an unsafe zone during this visit?
@@ -316,14 +317,12 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 results = model.predict(
                     frame,
                     imgsz=settings.infer_imgsz,
-                    conf=settings.conf_threshold,
+                    conf=settings.conf_keep,  # low floor; hysteresis is applied in code below
                     classes=[PERSON_CLASS_ID, CAT_CLASS_ID],
                     device=settings.device,
                     verbose=False,
                 )
                 zone_id = zone_ids_of_boxes(unsafe)  # group id per unsafe box
-                cat_zone_ids: set[int] = set()       # zones a cat sits in
-                human_zone_ids: set[int] = set()     # zones a human sits in
                 for r in results:
                     for box in r.boxes:
                         is_cat = int(box.cls[0]) == CAT_CLASS_ID
@@ -332,42 +331,66 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                         hit = point_in_boxes(cx, cy, unsafe)
                         detections.append((x1, y1, x2, y2, conf, hit, is_cat))
-                        if is_cat:
-                            if hit:
-                                cat_in_unsafe = True
-                                cat_zone_ids |= rect_zone_ids(x1, y1, x2, y2, unsafe, zone_id)
-                        else:  # human: which danger zone(s) does their box overlap?
-                            human_zone_ids |= rect_zone_ids(x1, y1, x2, y2, unsafe, zone_id)
 
-                cats = [d for d in detections if d[6]]
+                # Confidence hysteresis. YOLO ran at the lower `conf_keep` floor, so
+                # a cat hovering near threshold isn't dropped and re-acquired every
+                # frame (the flicker). A "confirmed" detection (>= conf_threshold)
+                # may *start* a visit / dwell timer; a "tentative" one (only
+                # >= conf_keep) merely *sustains* one already open.
+                cats_all = [d for d in detections if d[6]]
+                cats_conf = [d for d in cats_all if d[4] >= settings.conf_threshold]
                 humans = [d for d in detections if not d[6]]
-                cat_present = len(cats) > 0
-                best_conf_any = max((d[4] for d in cats), default=0.0)
-                best_conf_unsafe = max((d[4] for d in cats if d[5]), default=0.0)
-                # Human in the SAME danger zone as the cat => likely playing: suppress
-                # the alarm (but still alert Discord). Different zones => alarm stays.
+                humans_conf = [d for d in humans if d[4] >= settings.conf_threshold]
+
+                cat_present = bool(cats_conf)                    # acquire: open a visit
+                cat_present_keep = bool(cats_all)                # sustain: keep it open
+                cat_in_unsafe = any(d[5] for d in cats_conf)     # acquire: start dwell
+                cat_in_unsafe_keep = any(d[5] for d in cats_all)  # sustain: keep dwell alive
+                best_conf_any = max((d[4] for d in cats_all), default=0.0)
+                best_conf_unsafe = max((d[4] for d in cats_all if d[5]), default=0.0)
+
+                # Danger zones holding a cat (any conf) and a *confident* human. A
+                # phantom low-conf "person" must not be able to mute a real alarm,
+                # so the human side requires conf_threshold.
+                cat_zone_ids: set[int] = set()
+                for d in cats_all:
+                    if d[5]:
+                        cat_zone_ids |= rect_zone_ids(d[0], d[1], d[2], d[3], unsafe, zone_id)
+                human_zone_ids: set[int] = set()
+                for d in humans_conf:
+                    human_zone_ids |= rect_zone_ids(d[0], d[1], d[2], d[3], unsafe, zone_id)
+
+                # Human sharing the cat's zone => likely playing: suppress the alarm
+                # (Discord still fires). Remember *when* we last saw that so a
+                # one-frame miss of the person doesn't briefly un-suppress and let
+                # the alarm blare — suppression is held for `companion_grace` seconds.
+                if settings.suppress_alarm_with_human and (cat_zone_ids & human_zone_ids):
+                    last_companion = now
                 companion = (
                     settings.suppress_alarm_with_human
-                    and bool(cat_zone_ids & human_zone_ids)
+                    and (now - last_companion) <= settings.companion_grace
                 )
 
-                if cat_present:
-                    zone_note = " [UNSAFE ZONE]" if cat_in_unsafe else ""
+                if cat_present_keep:
+                    zone_note = " [UNSAFE ZONE]" if cat_in_unsafe_keep else ""
                     human_note = (
                         " +human(same zone)" if companion
-                        else " +human" if humans else ""
+                        else " +human" if humans_conf else ""
                     )
                     print(
-                        f"[detect] {len(cats)} cat(s){human_note} "
+                        f"[detect] {len(cats_all)} cat(s){human_note} "
                         f"conf={best_conf_any:.2f}{zone_note}",
                         flush=True,
                     )
 
                 # --- TIER 1: any cat anywhere ("passed by") -> log, notify, record ---
-                if cat_present:
+                # A tentative (keep-level) cat sustains an open visit; only a
+                # confirmed one opens a new one.
+                if cat_present_keep:
                     last_seen_present = now
                     event_max_conf = max(event_max_conf, best_conf_any)
-                    if present_since is None:  # start of a new visit
+                if present_since is None:
+                    if cat_present:  # start of a new visit (confident sighting)
                         present_since = now
                         event_max_conf = best_conf_any
                         event_seg = 1
@@ -381,18 +404,18 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                                      snapshot=snap, clip=event_rec.path or "")
                         send_discord(webhook, f"🐾 Cat spotted (conf {best_conf_any:.2f})",
                                      snapshot)
-                elif present_since is not None:
-                    # Visit ends once no cat has been seen for longer than the grace window.
-                    if now - last_seen_present > settings.presence_gap_grace:
-                        finalize_clip(event_rec.stop(), "left the frame")
-                        present_since = None
+                elif not cat_present_keep and now - last_seen_present > settings.presence_gap_grace:
+                    # Visit ends once not even a tentative cat has been seen for
+                    # longer than the grace window.
+                    finalize_clip(event_rec.stop(), "left the frame")
+                    present_since = None
 
                 # --- TIER 2: cat in an UNSAFE zone -> loud deterrent + urgent alert ---
-                if cat_in_unsafe:
+                if cat_in_unsafe_keep:
                     last_seen_unsafe = now
                     event_unsafe = True  # this visit's clip routes to the urgent channel
-                    if unsafe_since is None:
-                        unsafe_since = now
+                    if unsafe_since is None and cat_in_unsafe:
+                        unsafe_since = now  # only a confident in-zone cat starts the dwell timer
                 elif unsafe_since is not None:
                     # Cat has been out of the zone longer than the grace window.
                     if now - last_seen_unsafe > settings.presence_gap_grace:
@@ -418,24 +441,28 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                             alarm.start()
                         # Discord alert + logged snapshot, throttled so we don't spam.
                         if (now - last_alert) >= settings.alert_cooldown_s:
+                            # On a frame where the in-zone cat has momentarily
+                            # flickered out, fall back to the best conf seen this
+                            # visit instead of reporting a misleading 0.00.
+                            alert_conf = best_conf_unsafe if best_conf_unsafe > 0 else event_max_conf
                             if companion:
                                 msg = (
                                     f"🐾🧑 Cat + human together in the UNSAFE zone for "
                                     f"{int(dwell)}s (likely playing) — alarm off. "
-                                    f"conf={best_conf_unsafe:.2f}"
+                                    f"conf={alert_conf:.2f}"
                                 )
                                 event_name = "companion"
                             else:
                                 msg = (
                                     f"🚨 Cat on the sofa (UNSAFE zone) for {int(dwell)}s! "
-                                    f"conf={best_conf_unsafe:.2f}"
+                                    f"conf={alert_conf:.2f}"
                                 )
                                 event_name = "alert"
                             print(f"[watch] ALERT: {msg}")
                             snapshot = draw_overlay(frame.copy(), unsafe, detections, True)
                             snap_path = save_snapshot(settings, snapshot)
                             send_discord(urgent_webhook, msg, snapshot)
-                            append_event(settings, event_name, "sofa", best_conf_unsafe, dwell,
+                            append_event(settings, event_name, "sofa", alert_conf, dwell,
                                          snapshot=snap_path, clip=event_rec.path or "")
                             last_alert = now
 

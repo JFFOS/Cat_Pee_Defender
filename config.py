@@ -51,7 +51,14 @@ class Settings:
     camera_index: int = 0
 
     # Detection
-    conf_threshold: float = 0.50      # min YOLO confidence to count a cat
+    conf_threshold: float = 0.50      # min YOLO confidence to *acquire* a cat (start a visit/dwell)
+    # Confidence hysteresis. YOLO runs at `conf_keep` (the lower floor) so a cat
+    # whose confidence dips near the boundary isn't dropped and re-acquired every
+    # frame (the flicker). A detection must reach `conf_threshold` to *start* a
+    # visit or the in-zone dwell timer; between the two thresholds it only
+    # *sustains* one that's already open. Raise conf_keep toward conf_threshold if
+    # weak detections cause noise; lower it if the cat still flickers.
+    conf_keep: float = 0.30           # sustain-an-existing-track floor (YOLO predict runs at this)
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)
@@ -70,6 +77,11 @@ class Settings:
     # = fewer split clips and less Discord spam, at the cost of a little extra
     # empty footage tacked onto each clip.
     presence_gap_grace: float = 4.0   # was 1.5s (too short — chopped visits apart)
+    # How long a confirmed "human shares the cat's zone" sighting keeps the loud
+    # alarm suppressed. Like presence_gap_grace but for the companion signal: it
+    # bridges the person flickering out for a frame or two so the alarm doesn't
+    # blare in the gap while someone is clearly there playing with the cat.
+    companion_grace: float = 4.0
     alert_cooldown_s: float = 60.0    # min gap between two Discord alerts (sound loops regardless)
 
     # Active hours — the watcher detects and sends Discord alerts within this daily
