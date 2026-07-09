@@ -175,6 +175,42 @@ def draw_overlay(frame, unsafe: list[dict],
     return frame
 
 
+def print_startup_config(settings: Settings, source, is_file: bool,
+                         webhook: str | None, urgent_webhook: str | None,
+                         n_zones: int) -> None:
+    """Dump the effective runtime parameters to the log at startup."""
+    src = f"file {source!r}" if is_file else f"camera index {source}"
+    if not webhook:
+        discord = "sound-only (no webhook)"
+    elif urgent_webhook != webhook:
+        discord = "on (separate urgent channel)"
+    else:
+        discord = "on (single channel)"
+    lines = [
+        "----- watcher config -----",
+        f"  source            : {src}",
+        f"  zones             : {n_zones} unsafe zone(s) from {settings.zones_path}",
+        f"  model / device    : {settings.model_path} on {settings.device}",
+        f"  active hours      : {settings.active_start}–{settings.active_end} (local)",
+        f"  alarm hours       : {settings.alarm_start}–{settings.alarm_end} (local)",
+        f"  cat conf          : acquire ≥ {settings.conf_threshold:.2f}, "
+        f"keep ≥ {settings.conf_keep:.2f}",
+        f"  person conf       : ≥ {settings.person_conf_threshold:.2f}"
+        f"  (suppress alarm w/ human: {settings.suppress_alarm_with_human})",
+        f"  infer imgsz / N   : {settings.infer_imgsz}px every {settings.process_every_n} frame(s)",
+        f"  dwell / gap grace : dwell {settings.dwell_seconds:.1f}s, "
+        f"presence {settings.presence_gap_grace:.1f}s, companion {settings.companion_grace:.1f}s",
+        f"  alert cooldown    : {settings.alert_cooldown_s:.0f}s between Discord alerts",
+        f"  clips             : {settings.clip_width}px @ {settings.clip_fps:.0f}fps, "
+        f"≤ {settings.max_clip_seconds:.0f}s/part, {settings.clip_preroll_seconds:.0f}s pre-roll",
+        f"  discord video     : {discord} (≤ {settings.discord_max_bytes/1e6:.1f}MB)",
+        f"  local retention   : keep newest {settings.keep_recent} snapshots/clips",
+        f"  heartbeat         : every {settings.heartbeat_s:.0f}s",
+        "--------------------------",
+    ]
+    print("\n".join(lines), flush=True)
+
+
 def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     from ultralytics import YOLO
 
@@ -243,9 +279,8 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                   f"({reason}): {path}")
             send_discord_video(dest, msg, path, max_bytes=settings.discord_max_bytes)
 
-    print(f"[watch] running (active {settings.active_start}–{settings.active_end}; "
-          f"alarm {settings.alarm_start}–{settings.alarm_end}). "
-          "Press Ctrl-C (or 'q' in the preview window) to stop.")
+    print_startup_config(settings, source, is_file, webhook, urgent_webhook, len(unsafe_boxes))
+    print("[watch] running. Press Ctrl-C (or 'q' in the preview window) to stop.")
     was_active = True
     last_heartbeat = 0.0
     try:
