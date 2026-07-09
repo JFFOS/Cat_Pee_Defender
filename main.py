@@ -184,6 +184,9 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     print(f"[watch] loading model on device={settings.device} ...")
     model = YOLO(settings.model_path)
 
+    # A file source plays straight through; a live camera (int index) is released
+    # during off-hours so its LED goes dark instead of streaming to nobody.
+    is_file = isinstance(source, str)
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         sys.exit(
@@ -247,28 +250,11 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     last_heartbeat = 0.0
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                if isinstance(source, str):
-                    print("[watch] end of video source.")
-                    break
-                time.sleep(0.05)
-                continue
-
             now = time.time()
 
-            # --- Heartbeat: periodic "still alive" line for the headless log ---
-            if now - last_heartbeat >= settings.heartbeat_s:
-                active = within_active_window(settings)
-                if active:
-                    state = "cat present" if present_since is not None else "watching, no cat"
-                else:
-                    state = f"idle (off-hours, active {settings.active_start}-{settings.active_end})"
-                print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} alive — {state}",
-                      flush=True)
-                last_heartbeat = now
-
-            # --- Active-hours gate: outside the window, idle quietly ---
+            # --- Active-hours gate: outside the window, idle quietly with the
+            # camera released so a live webcam's LED goes dark. We check this
+            # *before* reading a frame so nothing keeps the camera streaming. ---
             if not within_active_window(settings):
                 if was_active:  # just crossed into off-hours: silence + wrap up
                     alarm.stop()
@@ -276,11 +262,21 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                         finalize_clip(event_rec.stop(), "off-hours")
                         present_since = None
                     unsafe_since = None
+                    if not is_file and cap is not None:
+                        cap.release()   # turn the webcam off (LED dark) while idle
+                        cap = None
                     print(f"[watch] outside active hours ({settings.active_start}–"
-                          f"{settings.active_end}); idling.")
+                          f"{settings.active_end}); idling"
+                          f"{'' if is_file else ' (camera released)'}.")
                     was_active = False
+                if now - last_heartbeat >= settings.heartbeat_s:
+                    print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} alive — "
+                          f"idle (off-hours, active {settings.active_start}-{settings.active_end})"
+                          f"{'' if is_file else '; camera off'}",
+                          flush=True)
+                    last_heartbeat = now
                 if show:
-                    idle = frame.copy()
+                    idle = np.zeros((480, 640, 3), dtype=np.uint8)
                     cv2.putText(idle, f"IDLE (active {settings.active_start}-{settings.active_end})",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (160, 160, 160), 2)
                     cv2.imshow("Cat Watch (q to quit)", idle)
@@ -289,8 +285,31 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 time.sleep(0.5)
                 continue
             if not was_active:
-                print("[watch] active hours resumed; watching.")
+                if cap is None:  # was released during off-hours: reopen the camera
+                    cap = cv2.VideoCapture(source)
+                    if not cap.isOpened():
+                        sys.exit(
+                            "Could not reopen the camera after idle hours. Check the index "
+                            "and Camera permission (System Settings -> Privacy & Security -> Camera)."
+                        )
+                print("[watch] active hours resumed; watching"
+                      f"{'' if is_file else ' (camera on)'}.")
                 was_active = True
+
+            ok, frame = cap.read()
+            if not ok:
+                if is_file:
+                    print("[watch] end of video source.")
+                    break
+                time.sleep(0.05)
+                continue
+
+            # --- Heartbeat: periodic "still alive" line for the headless log ---
+            if now - last_heartbeat >= settings.heartbeat_s:
+                state = "cat present" if present_since is not None else "watching, no cat"
+                print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} alive — {state}",
+                      flush=True)
+                last_heartbeat = now
 
             # Keep the last few seconds on hand so a visit clip can begin a bit
             # before the cat is first spotted (pre-roll).
@@ -489,7 +508,8 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     finally:
         alarm.stop()
         finalize_clip(event_rec.stop(), "watcher stopped")
-        cap.release()
+        if cap is not None:
+            cap.release()
         cv2.destroyAllWindows()
 
 
