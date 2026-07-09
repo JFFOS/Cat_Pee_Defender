@@ -59,6 +59,10 @@ class Settings:
     # *sustains* one that's already open. Raise conf_keep toward conf_threshold if
     # weak detections cause noise; lower it if the cat still flickers.
     conf_keep: float = 0.30           # sustain-an-existing-track floor (YOLO predict runs at this)
+    # Min YOLO confidence for a *person*. Held higher than the cat's conf_threshold
+    # because a confident human is what suppresses the alarm (companion play) — a
+    # phantom low-conf "person" must not be able to mute a real alarm.
+    person_conf_threshold: float = 0.60
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)

@@ -340,7 +340,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 cats_all = [d for d in detections if d[6]]
                 cats_conf = [d for d in cats_all if d[4] >= settings.conf_threshold]
                 humans = [d for d in detections if not d[6]]
-                humans_conf = [d for d in humans if d[4] >= settings.conf_threshold]
+                humans_conf = [d for d in humans if d[4] >= settings.person_conf_threshold]
 
                 cat_present = bool(cats_conf)                    # acquire: open a visit
                 cat_present_keep = bool(cats_all)                # sustain: keep it open
