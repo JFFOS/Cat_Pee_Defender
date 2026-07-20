@@ -28,6 +28,16 @@ EVENTS_CSV = LOG_DIR / "events.csv"
 SNAPSHOT_DIR = LOG_DIR / "snapshots"
 CLIP_DIR = LOG_DIR / "clips"
 
+# Manual mute override. A cross-process signal: when this file exists the loud
+# local alarm is suppressed regardless of alarm hours (Discord alerts still
+# fire). The menu-bar app creates/removes it; the watcher checks it each loop.
+MUTE_FLAG = LOG_DIR / "mute.flag"
+
+# Live preview toggle. Same cross-process pattern: when this file exists the
+# running watcher opens an OpenCV preview window (the detection overlay); remove
+# it and the window closes. Lets the menu bar show/hide the feed without a restart.
+PREVIEW_FLAG = LOG_DIR / "preview.flag"
+
 # COCO class indices.
 CAT_CLASS_ID = 15
 PERSON_CLASS_ID = 0
@@ -66,6 +76,14 @@ class Settings:
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)
+
+    # In near-dark frames YOLO produces noisy phantom detections that have
+    # triggered false alarms at night. When the frame's mean brightness (0–255
+    # over BGR) falls below this floor the scene is treated as too dark to trust:
+    # YOLO inference is skipped entirely for that frame (no detections, no Discord
+    # alerts, no alarm). Raise it if dark-scene false alarms persist; lower it
+    # toward 0 to disable the darkness gate.
+    min_brightness: float = 40.0
 
     # If a human shares the same danger zone as the cat, assume they're playing
     # with it: skip the loud alarm but still send the Discord alert. A human in a
@@ -125,6 +143,8 @@ class Settings:
     events_csv: str = str(EVENTS_CSV)
     snapshot_dir: str = str(SNAPSHOT_DIR)
     clip_dir: str = str(CLIP_DIR)
+    mute_flag: str = str(MUTE_FLAG)
+    preview_flag: str = str(PREVIEW_FLAG)
 
     @property
     def discord_webhook_url(self) -> str | None:

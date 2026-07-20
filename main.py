@@ -91,6 +91,20 @@ def within_alarm_window(settings: Settings) -> bool:
     return _within_window(settings.alarm_start, settings.alarm_end)
 
 
+def _quit_or_hide_preview(settings: Settings, cli_show: bool) -> bool:
+    """Handle 'q' in the preview window.
+
+    With CLI --show the preview is the whole point, so 'q' quits the watcher
+    (returns True). For a menu-bar-toggled preview 'q' just closes the window —
+    clear the flag and tear the window down, but keep watching (returns False).
+    """
+    if cli_show:
+        return True
+    Path(settings.preview_flag).unlink(missing_ok=True)
+    cv2.destroyAllWindows()
+    return False
+
+
 def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     for b in boxes:
         if b["x"] <= px <= b["x"] + b["w"] and b["y"] <= py <= b["y"] + b["h"]:
@@ -197,6 +211,7 @@ def print_startup_config(settings: Settings, source, is_file: bool,
         f"keep ≥ {settings.conf_keep:.2f}",
         f"  person conf       : ≥ {settings.person_conf_threshold:.2f}"
         f"  (suppress alarm w/ human: {settings.suppress_alarm_with_human})",
+        f"  min brightness    : ≥ {settings.min_brightness:.0f} (detection paused when darker)",
         f"  infer imgsz / N   : {settings.infer_imgsz}px every {settings.process_every_n} frame(s)",
         f"  dwell / gap grace : dwell {settings.dwell_seconds:.1f}s, "
         f"presence {settings.presence_gap_grace:.1f}s, companion {settings.companion_grace:.1f}s",
@@ -283,9 +298,19 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     print("[watch] running. Press Ctrl-C (or 'q' in the preview window) to stop.")
     was_active = True
     last_heartbeat = 0.0
+    last_dark_log = 0.0
+    show_prev = show
     try:
         while True:
             now = time.time()
+
+            # Preview can be toggled live from the menu bar via a flag file (or
+            # forced on for the whole run with --show). When it turns off, tear
+            # the window down so it actually disappears.
+            show_now = show or Path(settings.preview_flag).exists()
+            if show_prev and not show_now:
+                cv2.destroyAllWindows()
+            show_prev = show_now
 
             # --- Active-hours gate: outside the window, idle quietly with the
             # camera released so a live webcam's LED goes dark. We check this
@@ -310,12 +335,12 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                           f"{'' if is_file else '; camera off'}",
                           flush=True)
                     last_heartbeat = now
-                if show:
+                if show_now:
                     idle = np.zeros((480, 640, 3), dtype=np.uint8)
                     cv2.putText(idle, f"IDLE (active {settings.active_start}-{settings.active_end})",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (160, 160, 160), 2)
                     cv2.imshow("Cat Watch (q to quit)", idle)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                    if cv2.waitKey(1) & 0xFF == ord("q") and _quit_or_hide_preview(settings, show):
                         break
                 time.sleep(0.5)
                 continue
@@ -350,21 +375,49 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
             # before the cat is first spotted (pre-roll).
             event_rec.buffer(frame, now)
 
-            # Alarm is only allowed to sound inside the nested alarm window. If we
-            # cross out of it while the cat lingers, silence the loop but keep
-            # detecting and alerting Discord.
-            alarm_allowed = not no_sound and within_alarm_window(settings)
+            # Alarm is only allowed to sound inside the nested alarm window, and
+            # can be manually muted from the menu bar (a cross-process flag file).
+            # In either case we silence the loop but keep detecting and alerting
+            # Discord.
+            muted = Path(settings.mute_flag).exists()
+            # Near-dark frames make YOLO hallucinate; suppress the loud alarm when
+            # the scene is too dim to trust (Discord alerts still fire).
+            mean_brightness = float(frame.mean())
+            too_dark = mean_brightness < settings.min_brightness
+            alarm_allowed = (
+                not no_sound and not muted and not too_dark
+                and within_alarm_window(settings)
+            )
             if alarm.playing and not alarm_allowed:
                 alarm.stop()
-                print("[watch] outside alarm hours "
-                      f"({settings.alarm_start}–{settings.alarm_end}); "
-                      "alarm silenced (still alerting Discord).")
+                if muted:
+                    print("[watch] alarm manually muted from menu bar; "
+                          "silenced (still alerting Discord).")
+                elif too_dark:
+                    print(f"[watch] scene too dark (brightness {mean_brightness:.0f} < "
+                          f"{settings.min_brightness:.0f}); alarm silenced "
+                          "and detection paused.")
+                else:
+                    print("[watch] outside alarm hours "
+                          f"({settings.alarm_start}–{settings.alarm_end}); "
+                          "alarm silenced (still alerting Discord).")
 
             frame_i += 1
             detections: list[tuple] = []
             cat_in_unsafe = False
 
-            if frame_i % settings.process_every_n == 0:
+            # In a near-dark scene YOLO only produces noise, so skip inference
+            # entirely: no false detections, no phantom Discord alerts, less
+            # compute. An in-progress visit lapses via the usual grace window.
+            if too_dark:
+                if now - last_dark_log >= settings.heartbeat_s:
+                    print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} "
+                          f"too dark (brightness {mean_brightness:.0f} < "
+                          f"{settings.min_brightness:.0f}); detection paused.",
+                          flush=True)
+                    last_dark_log = now
+
+            if not too_dark and frame_i % settings.process_every_n == 0:
                 h, w = frame.shape[:2]
                 unsafe = scale_boxes(unsafe_boxes, ref_w, ref_h, w, h)
 
@@ -532,11 +585,11 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     # no pre-roll (that would duplicate the tail of the prior part).
                     event_rec.start(frame, now, include_preroll=False)
 
-            if show:
+            if show_now:
                 view = draw_overlay(frame.copy(), unsafe, detections,
                                     cat_in_unsafe, recording=event_rec.active)
                 cv2.imshow("Cat Watch (q to quit)", view)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                if cv2.waitKey(1) & 0xFF == ord("q") and _quit_or_hide_preview(settings, show):
                     break
     except KeyboardInterrupt:
         print("\n[watch] stopped by user.")
