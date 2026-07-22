@@ -140,7 +140,7 @@ class Settings:
     clip_width: int = 960             # downscale width (H.264 keeps these small)
     clip_fps: float = 12.0            # playback fps for saved clips
     max_clip_seconds: float = 60.0    # cap per segment; long visits upload as parts 1..N
-    clip_preroll_seconds: float = 4.0  # footage kept before T+0 (the moment the cat is spotted)
+    clip_preroll_seconds: float = 2.0  # footage kept before T+0 (the moment the cat is spotted)
 
     # Discord video
     discord_video: bool = True        # upload the event clip to Discord
