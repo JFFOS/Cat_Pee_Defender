@@ -13,6 +13,7 @@ from collections import deque
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 CSV_HEADER = [
     "timestamp", "event", "zone", "confidence", "dwell_s", "snapshot", "clip"
@@ -97,9 +98,12 @@ class ClipRecorder:
         self.path: str | None = None
         self.until: float = 0.0
         self._out_size: tuple[int, int] | None = None
-        # Rolling buffer of recent (timestamp, resized frame) so a clip can begin
-        # `preroll` seconds before the cat is spotted. Fed via buffer() every loop.
-        self._preroll_buf: deque[tuple[float, "cv2.Mat"]] = deque()
+        # Rolling buffer of recent (timestamp, w, h, jpeg bytes) so a clip can
+        # begin `preroll` seconds before the cat is spotted. Frames are stored
+        # JPEG-compressed and sampled at the clip fps (not the camera fps), which
+        # keeps the buffer a few MB instead of hundreds of MB of raw frames.
+        self._preroll_buf: deque[tuple[float, int, int, bytes]] = deque()
+        self._last_buffered: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -128,10 +132,20 @@ class ClipRecorder:
 
     def buffer(self, frame, now: float) -> None:
         """Keep the last `preroll` seconds of frames on hand so start() can
-        prepend them. Call every loop while watching (cheap: one resize + prune)."""
+        prepend them. Sampled at the clip fps and stored as JPEG so the rolling
+        buffer stays small (a few MB) regardless of camera frame rate."""
         if self.preroll <= 0:
             return
-        self._preroll_buf.append((now, self._resize(frame)))
+        # Camera delivers frames faster than the clip plays them back; keeping
+        # more than `fps` frames per second in the buffer is pure RAM waste.
+        if self.fps > 0 and (now - self._last_buffered) < (1.0 / self.fps):
+            return
+        small = self._resize(frame)
+        ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return
+        self._last_buffered = now
+        self._preroll_buf.append((now, small.shape[1], small.shape[0], jpg.tobytes()))
         cutoff = now - self.preroll
         while self._preroll_buf and self._preroll_buf[0][0] < cutoff:
             self._preroll_buf.popleft()
@@ -149,10 +163,14 @@ class ClipRecorder:
             cutoff = now - self.preroll
             # Only frames that match the writer's dimensions (guards against a
             # mid-run resolution change) get flushed as pre-roll.
-            for ts, buf_frame in self._preroll_buf:
-                if ts >= cutoff and (buf_frame.shape[1], buf_frame.shape[0]) == (w, h):
-                    self.writer.write(buf_frame)
-                    pre_n += 1
+            for ts, bw, bh, jpg in self._preroll_buf:
+                if ts >= cutoff and (bw, bh) == (w, h):
+                    buf_frame = cv2.imdecode(
+                        np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR
+                    )
+                    if buf_frame is not None:
+                        self.writer.write(buf_frame)
+                        pre_n += 1
         pre_note = f" (+{pre_n} pre-roll frames)" if pre_n else ""
         print(f"[{self.label}] started {self.seconds:.0f}s {self.codec} clip{pre_note} "
               f"-> {self.path}")

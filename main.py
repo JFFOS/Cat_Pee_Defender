@@ -105,6 +105,39 @@ def _quit_or_hide_preview(settings: Settings, cli_show: bool) -> bool:
     return False
 
 
+def open_capture(source, settings: Settings) -> cv2.VideoCapture:
+    """Open the video source; for a live camera, request the capped resolution.
+
+    Capping capture at ~720p shrinks every frame the loop handles (copies,
+    overlays, pre-roll buffer) with no downstream loss: YOLO infers at 640 and
+    clips are written at 960 wide regardless.
+    """
+    cap = cv2.VideoCapture(source)
+    if not isinstance(source, str) and cap.isOpened():
+        if settings.capture_width > 0:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.capture_width)
+        if settings.capture_height > 0:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.capture_height)
+    return cap
+
+
+def release_gpu_cache(settings: Settings) -> None:
+    """Hand PyTorch's cached MPS memory back to the OS (no-op on CPU).
+
+    The MPS allocator keeps the full inference working set cached between
+    predicts; releasing it periodically keeps the watcher's resident footprint
+    near its actual need at the cost of a cheap allocator re-warm.
+    """
+    if settings.device != "mps":
+        return
+    try:
+        import torch
+
+        torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
 def point_in_boxes(px: float, py: float, boxes: list[dict]) -> bool:
     for b in boxes:
         if b["x"] <= px <= b["x"] + b["w"] and b["y"] <= py <= b["y"] + b["h"]:
@@ -204,7 +237,11 @@ def print_startup_config(settings: Settings, source, is_file: bool,
         "----- watcher config -----",
         f"  source            : {src}",
         f"  zones             : {n_zones} unsafe zone(s) from {settings.zones_path}",
-        f"  model / device    : {settings.model_path} on {settings.device}",
+        f"  model / device    : {settings.model_path} on {settings.device}"
+        f" ({'fp16' if settings.infer_half and settings.device != 'cpu' else 'fp32'})",
+        f"  capture cap       : "
+        + (f"{settings.capture_width}x{settings.capture_height}"
+           if settings.capture_width and settings.capture_height else "camera default"),
         f"  active hours      : {settings.active_start}–{settings.active_end} (local)",
         f"  alarm hours       : {settings.alarm_start}–{settings.alarm_end} (local)",
         f"  cat conf          : acquire ≥ {settings.conf_threshold:.2f}, "
@@ -238,7 +275,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     # A file source plays straight through; a live camera (int index) is released
     # during off-hours so its LED goes dark instead of streaming to nobody.
     is_file = isinstance(source, str)
-    cap = cv2.VideoCapture(source)
+    cap = open_capture(source, settings)
     if not cap.isOpened():
         sys.exit(
             "Could not open the video source. If using the camera, check the index and that "
@@ -299,6 +336,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
     was_active = True
     last_heartbeat = 0.0
     last_dark_log = 0.0
+    last_cache_release = time.time()
     show_prev = show
     try:
         while True:
@@ -325,6 +363,8 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     if not is_file and cap is not None:
                         cap.release()   # turn the webcam off (LED dark) while idle
                         cap = None
+                    # Idle for hours: hand the GPU inference cache back to the OS.
+                    release_gpu_cache(settings)
                     print(f"[watch] outside active hours ({settings.active_start}–"
                           f"{settings.active_end}); idling"
                           f"{'' if is_file else ' (camera released)'}.")
@@ -346,7 +386,7 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 continue
             if not was_active:
                 if cap is None:  # was released during off-hours: reopen the camera
-                    cap = cv2.VideoCapture(source)
+                    cap = open_capture(source, settings)
                     if not cap.isOpened():
                         sys.exit(
                             "Could not reopen the camera after idle hours. Check the index "
@@ -370,6 +410,12 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                 print(f"[watch] {time.strftime('%H:%M:%S', time.localtime(now))} alive — {state}",
                       flush=True)
                 last_heartbeat = now
+
+            # Periodically return PyTorch's cached MPS memory to the OS so the
+            # resident footprint tracks actual need instead of the peak.
+            if now - last_cache_release >= settings.gpu_cache_release_s:
+                release_gpu_cache(settings)
+                last_cache_release = now
 
             # Keep the last few seconds on hand so a visit clip can begin a bit
             # before the cat is first spotted (pre-roll).
@@ -427,6 +473,9 @@ def run_watch(settings: Settings, source, show: bool, no_sound: bool) -> None:
                     conf=settings.conf_keep,  # low floor; hysteresis is applied in code below
                     classes=[PERSON_CLASS_ID, CAT_CLASS_ID],
                     device=settings.device,
+                    # fp16 halves activation memory; verified to give identical
+                    # detections to fp32 on this model/device.
+                    quantize=16 if settings.infer_half and settings.device != "cpu" else None,
                     verbose=False,
                 )
                 zone_id = zone_ids_of_boxes(unsafe)  # group id per unsafe box

@@ -59,6 +59,13 @@ def _auto_device() -> str:
 class Settings:
     # Capture
     camera_index: int = 0
+    # Ask the camera for this resolution instead of its (often 1080p+) default.
+    # Every raw frame the loop touches — copies, overlays, the pre-roll buffer —
+    # scales with this, so capping it is a large RAM/CPU saving. YOLO inference
+    # runs at `infer_imgsz` (640) and clips at `clip_width` (960) either way, so
+    # 720p loses nothing downstream. Set both to 0 to keep the camera's default.
+    capture_width: int = 1280
+    capture_height: int = 720
 
     # Detection
     conf_threshold: float = 0.50      # min YOLO confidence to *acquire* a cat (start a visit/dwell)
@@ -76,6 +83,13 @@ class Settings:
     infer_imgsz: int = 640            # inference resolution (640 detects the small blurry cat best)
     process_every_n: int = 3          # run YOLO on every Nth grabbed frame
     device: str = field(default_factory=_auto_device)
+    # Run inference in fp16 on the GPU (MPS). Halves activation memory with no
+    # practical accuracy loss for detection; ignored on CPU (unsupported there).
+    infer_half: bool = True
+    # Release PyTorch's cached GPU memory back to the OS this often (seconds).
+    # The MPS allocator otherwise holds the full inference working set forever.
+    # Costs one allocator re-warm per interval — invisible at our frame budget.
+    gpu_cache_release_s: float = 300.0
 
     # In near-dark frames YOLO produces noisy phantom detections that have
     # triggered false alarms at night. When the frame's mean brightness (0–255
