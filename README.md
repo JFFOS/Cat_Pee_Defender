@@ -64,6 +64,25 @@ Both scripts call the `Cat_pee` conda interpreter directly; edit the `PY=` line 
 `run_watcher.command` if your Python lives elsewhere. (Terminal needs Camera
 permission for the headless run.)
 
+### Menu-bar app (macOS)
+
+**Double-click `run_menubar.command`** to put a 🐾 icon in your Mac menu bar for
+at-a-glance status and one-click control (requires `rumps`, included in
+`requirements.txt`). The icon reflects the watcher's state:
+
+| Icon | Meaning |
+|------|---------|
+| 🐾 | Running **and** inside active hours (actively watching) |
+| 😴 | Running but off-hours (idle, camera released) |
+| 🚫 | Not running |
+
+Click it for live status (pid, hours/alarm state, last heartbeat, last event) and
+quick actions: **Start / Stop / Restart** the watcher, **Test sound / Test
+Discord**, and **Open log / clips folder / events.csv**. Quitting the menu-bar app
+does **not** stop the watcher — it's a separate process. Add `run_menubar.command`
+to **Login Items** to show the icon at every login. It uses the same `Cat_pee`
+interpreter (override with the `CAT_PEE_PYTHON` env var).
+
 ### Active hours
 
 By default the watcher only detects & alarms between **09:30 and 22:00** (local
