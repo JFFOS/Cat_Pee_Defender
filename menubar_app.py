@@ -2,7 +2,8 @@
 
 A small always-there icon in the Mac menu bar so you can tell at a glance whether
 the headless watcher (`main.py`) is running, and fire quick actions without
-opening Terminal.
+opening Terminal. On launch it auto-starts the watcher if it isn't already
+running, so adding this app to Login Items is enough to begin watching.
 
 Icon at a glance:
     🐾  running & inside active hours (actively watching)
@@ -135,19 +136,34 @@ def last_event(settings: Settings) -> str | None:
     return f"{event} in {zone} · conf {conf} · {ts}"
 
 
+def _notify(subtitle: str, message: str) -> None:
+    """rumps.notification, but never fatal.
+
+    On interpreters without an Info.plist/CFBundleIdentifier (plain conda
+    python) the notification center raises RuntimeError; fall back to the log
+    so actions (and especially __init__'s auto-start) still complete.
+    """
+    try:
+        rumps.notification("Cat Watcher", subtitle, message)
+    except Exception as exc:
+        print(f"[menubar] {subtitle}: {message} (notification failed: {exc})")
+
+
 def _reveal(path: Path) -> None:
     """Open a file/folder in Finder (or its default app)."""
     if path.exists():
         subprocess.run(["open", "-R" if path.is_file() else "", str(path)],
                        check=False)
     else:
-        rumps.notification("Cat Watcher", "Not found yet", str(path))
+        _notify("Not found yet", str(path))
 
 
 class CatWatcherApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Cat Watcher", title="🐾", quit_button=None)
-        self.settings = Settings()
+        # device="cpu" skips _auto_device()'s torch import (~170 MB) — the menu
+        # bar never runs inference, it only reads paths/hours from Settings.
+        self.settings = Settings(device="cpu")
 
         # Read-only status lines (updated on each poll).
         self.status_item = rumps.MenuItem("Status: …")
@@ -182,6 +198,11 @@ class CatWatcherApp(rumps.App):
             rumps.MenuItem("Quit menu bar (watcher keeps running)",
                            callback=rumps.quit_application),
         ]
+
+        # Auto-start the watcher if it isn't running, so putting this app in
+        # Login Items is enough to begin watching.
+        if not watcher_pids():
+            _notify("Auto-start", start_watcher())
 
         self.refresh(None)
         self.timer = rumps.Timer(self.refresh, POLL_SECONDS)
@@ -254,18 +275,18 @@ class CatWatcherApp(rumps.App):
 
     # --- actions --------------------------------------------------------------
     def on_start(self, _s) -> None:
-        rumps.notification("Cat Watcher", "Start", start_watcher())
+        _notify("Start", start_watcher())
         self.refresh(None)
 
     def on_stop(self, _s) -> None:
-        rumps.notification("Cat Watcher", "Stop", stop_watcher())
+        _notify("Stop", stop_watcher())
         self.refresh(None)
 
     def on_restart(self, _s) -> None:
         stop_watcher()
         # Give the old process a moment to release the camera before reopening.
         time.sleep(1.5)
-        rumps.notification("Cat Watcher", "Restart", start_watcher())
+        _notify("Restart", start_watcher())
         self.refresh(None)
 
     def on_toggle_mute(self, _s) -> None:
@@ -273,13 +294,13 @@ class CatWatcherApp(rumps.App):
         now_muted = not self.is_muted()
         self.set_muted(now_muted)
         if now_muted:
-            rumps.notification(
-                "Cat Watcher", "🔇 Alarm muted",
+            _notify(
+                "🔇 Alarm muted",
                 "Loud alarm suppressed until you unmute. Discord alerts still fire.",
             )
         else:
-            rumps.notification(
-                "Cat Watcher", "🔊 Alarm unmuted",
+            _notify(
+                "🔊 Alarm unmuted",
                 "Loud alarm re-armed (subject to alarm hours).",
             )
         self.refresh(None)
@@ -291,17 +312,17 @@ class CatWatcherApp(rumps.App):
         now_on = not self.preview_on()
         self.set_preview(now_on)
         if now_on and not watcher_pids():
-            rumps.notification(
-                "Cat Watcher", "🖥 Preview will open when watching",
+            _notify(
+                "🖥 Preview will open when watching",
                 "The watcher is stopped — the preview appears once it's running.",
             )
         elif now_on:
-            rumps.notification(
-                "Cat Watcher", "🖥 Preview opening",
+            _notify(
+                "🖥 Preview opening",
                 "Live detection window is opening (press q in it to close).",
             )
         else:
-            rumps.notification("Cat Watcher", "🖥 Preview closed", "Live window hidden.")
+            _notify("🖥 Preview closed", "Live window hidden.")
         self.refresh(None)
 
     def on_test_sound(self, _s) -> None:
@@ -314,7 +335,7 @@ class CatWatcherApp(rumps.App):
         if LOG.exists():
             subprocess.run(["open", "-a", "Console", str(LOG)], check=False)
         else:
-            rumps.notification("Cat Watcher", "No log yet", str(LOG))
+            _notify("No log yet", str(LOG))
 
     def on_open_clips(self, _s) -> None:
         _reveal(Path(self.settings.clip_dir))
